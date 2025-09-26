@@ -1,0 +1,9 @@
+segment,wallet_count
+any genesis (overall),508
+any babies (overall),1948
+genesis,97
+babies,565
+genesis + babies,96
+genesis and/or babies + VX (Any),91
+genesis and/or babies + Genkai (Any),907
+genesis and/or babies + VX+Genkai (Any),424
