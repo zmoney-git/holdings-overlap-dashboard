@@ -1,6 +1,7 @@
 import os
 import io
 import datetime as dt
+from typing import List
 
 import pandas as pd
 import plotly.express as px
@@ -21,12 +22,16 @@ GK_RON_COL  = "CyberKongz Genkai (Ronin)"
 VX_ANY_COL  = "CyberKongz VX (Any)"
 GK_ANY_COL  = "CyberKongz Genkai (Any)"
 
+# Holding-time CSVs (ETH only)
+HOLD_TOKEN_CSV  = "holding_times_token.csv"   # wallet, contract, collection, token_id, acquired_at_iso, days_held
+HOLD_WALLET_CSV = "holding_times_wallet.csv"  # wallet, collection, tokens, min_days, p50_days, avg_days, max_days
+
 # =========================
-# Page config
+# Page config + small CSS
 # =========================
 st.set_page_config(page_title="CyberKongz — Holders & Overlap", page_icon="🦍", layout="wide")
 
-# Small CSS for the highlight card
+# CSS tweaks (incl. highlight box for thresholds)
 st.markdown(
     """
     <style>
@@ -36,22 +41,12 @@ st.markdown(
       padding: 16px 20px;
       border-radius: 14px;
     }
-    .hi-title {
-      margin: 0 0 4px 0;
-      font-size: 1rem;
-      opacity: .85;
-    }
-    .hi-value {
-      margin: 0;
-      font-size: 3rem !important;   /* force bigger */
-      font-weight: 900 !important;  /* force bolder */
-      color: #ffffff !important;    /* force white */
-    }
+    .hi-title { margin: 0 0 4px 0; font-size: 1rem; opacity: .85; }
+    .hi-value { margin: 0; font-size: 3rem !important; font-weight: 900 !important; color: #ffffff !important; }
     </style>
     """,
     unsafe_allow_html=True,
 )
-
 
 # =========================
 # Data helpers
@@ -70,6 +65,12 @@ def load_all(output_dir: str):
     overlap  = load_csv(os.path.join(output_dir, "overlap_summary.csv"))
     members  = load_csv(os.path.join(output_dir, "combination_membership.csv"))
     return holdings, overlap, members
+
+@st.cache_data(show_spinner=False)
+def load_holding_time(output_dir: str):
+    tokens  = load_csv(os.path.join(output_dir, HOLD_TOKEN_CSV))
+    wallets = load_csv(os.path.join(output_dir, HOLD_WALLET_CSV))
+    return tokens, wallets
 
 def ensure_wallet_col(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -97,6 +98,10 @@ def add_missing_any_columns(mat: pd.DataFrame) -> pd.DataFrame:
         mat[GK_ANY_COL] = gk_any
     return mat
 
+def subset_by_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+    keep = ["wallet"] + [c for c in cols if c in df.columns]
+    return df[keep]
+
 def fmt_int(n) -> str:
     try:
         return f"{int(n):,}"
@@ -118,7 +123,7 @@ def download_df_button(df: pd.DataFrame, label: str, filename: str):
     )
 
 # =========================
-# Header (no sidebar, hardcoded output path)
+# Header (hardcoded output path)
 # =========================
 st.title("🦍 CyberKongz — Holders & Overlap")
 
@@ -131,7 +136,9 @@ st.caption(f"Data last updated: {file_age_str(pf)}")
 st.markdown(
     """
     <div style='background-color:#fff3cd; color:#856404; padding:10px; border-radius:6px;'>
-        <b>Remarks:</b> Polygon VX not included
+        <b>Remarks:</b>
+        \n Polygon VX not included in any data
+        \n Duration: Ronin VX and Genkai not included
     </div>
     """,
     unsafe_allow_html=True
@@ -148,14 +155,14 @@ holdings = ensure_wallet_col(holdings)
 members  = ensure_wallet_col(members)
 
 if holdings.empty or "wallet" not in holdings.columns:
-    st.warning("No data found. Make sure `per_wallet_holdings.csv` exists in the selected output folder.")
+    st.warning("No data found. Make sure `per_wallet_holdings.csv` exists in the `output/` folder.")
     st.stop()
 
 # Ensure (Any) columns are present
 holdings = add_missing_any_columns(holdings)
 
 # =========================
-# Top KPI (wallet-holder counts)
+# Top KPIs (wallet-holder counts)
 # =========================
 k1, k2, k3, k4 = st.columns(4)
 distinct_wallets = holdings["wallet"].nunique()
@@ -178,7 +185,7 @@ tab_thresholds, tab_overview, tab_downloads = st.tabs(
 
 # -------- Threshold query --------
 with tab_thresholds:
-    st.subheader("Holding treshholds")
+    st.subheader("Minimum holdings query")
 
     def col_safe(name: str):
         return (holdings[name] if name in holdings.columns else 0)
@@ -264,13 +271,11 @@ with tab_thresholds:
     if not table.empty:
         buf = io.StringIO()
         table.to_csv(buf, index=False)
-        st.download_button(
-            "Download matching wallets CSV",
-            buf.getvalue().encode("utf-8"),
-            file_name="threshold_query_wallets.csv",
-            mime="text/csv",
-            width="stretch",
-        )
+        st.download_button("Download matching wallets CSV",
+                           buf.getvalue().encode("utf-8"),
+                           file_name="threshold_query_wallets.csv",
+                           mime="text/csv",
+                           width="stretch")
     else:
         st.button("Download matching wallets CSV", disabled=True, width="stretch")
 
@@ -319,4 +324,178 @@ with tab_downloads:
         download_df_button(overlap, "overlap_summary.csv", "overlap_summary.csv")
         download_df_button(members, "combination_membership.csv", "combination_membership.csv")
 
-st.caption("No API calls here — this app reads CSVs generated by your fetcher script.")
+# =========================
+# NEW SECTION — Holding time (ETH only)
+# =========================
+st.divider()
+st.header("⌛ Holding time (ETH only)")
+
+tokens_ht, wallets_ht = load_holding_time(out_dir)
+if tokens_ht.empty:
+    st.info("No holding-time data found. Run your enrichment script to create `holding_times_token.csv` and `holding_times_wallet.csv` in `output/`.")
+else:
+    # Normalize columns
+    if "collection" not in tokens_ht.columns or "days_held" not in tokens_ht.columns:
+        st.warning("`holding_times_token.csv` is missing required columns.")
+    else:
+        tab_ht_thresh, tab_ht_charts = st.tabs(["Hold threshold", "Duration charts"])
+
+        # ---------- Hold threshold tab ----------
+        with tab_ht_thresh:
+            st.subheader("Held at least X days (ETH only)")
+            min_days = st.number_input("Minimum days held", min_value=0, value=30, step=1)
+
+            filt = tokens_ht[tokens_ht["days_held"] >= float(min_days)]
+            # Ensure only the 4 target collections (ETH labels)
+            target_labels = [GENESIS_COL, BABIES_COL, VX_ETH_COL, GK_ETH_COL]
+            filt = filt[filt["collection"].isin(target_labels)]
+
+            # Counts per collection (NFT count, not wallets)
+            counts_nft = (
+                filt.groupby("collection")
+                .size()
+                .reindex(target_labels)
+                .fillna(0)
+                .astype(int)
+                .rename("nft_count")
+                .reset_index()
+            )
+            nft_map = {row["collection"]: int(row["nft_count"]) for _, row in counts_nft.iterrows()}
+
+            # NEW: counts per collection (unique wallets)
+            counts_wallet = (
+                filt.groupby("collection")["wallet"]
+                .nunique()
+                .reindex(target_labels)
+                .fillna(0)
+                .astype(int)
+                .rename("wallets")
+                .reset_index()
+            )
+            wallet_map = {row["collection"]: int(row["wallets"]) for _, row in counts_wallet.iterrows()}
+
+            # ---------- KPI ROW 1: NFT counts ----------
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.metric("Genesis (ETH) NFTs ≥ days", f"{nft_map.get(GENESIS_COL, 0):,}")
+            with c2:
+                st.metric("Babies (ETH) NFTs ≥ days", f"{nft_map.get(BABIES_COL, 0):,}")
+            with c3:
+                st.metric("VX (ETH) NFTs ≥ days", f"{nft_map.get(VX_ETH_COL, 0):,}")
+            with c4:
+                st.metric("Genkai (ETH) NFTs ≥ days", f"{nft_map.get(GK_ETH_COL, 0):,}")
+
+            # ---------- KPI ROW 2: Wallet counts (NEW) ----------
+            w1, w2, w3, w4 = st.columns(4)
+            with w1:
+                st.metric("Genesis (ETH) wallets ≥ days", f"{wallet_map.get(GENESIS_COL, 0):,}")
+            with w2:
+                st.metric("Babies (ETH) wallets ≥ days", f"{wallet_map.get(BABIES_COL, 0):,}")
+            with w3:
+                st.metric("VX (ETH) wallets ≥ days", f"{wallet_map.get(VX_ETH_COL, 0):,}")
+            with w4:
+                st.metric("Genkai (ETH) wallets ≥ days", f"{wallet_map.get(GK_ETH_COL, 0):,}")
+
+            # Show the filtered rows (compact)
+            st.markdown("**Matching NFTs (token-level)**")
+            small = filt[["wallet", "collection", "token_id", "days_held", "acquired_at_iso"]].sort_values(
+                ["collection", "days_held"], ascending=[True, False]
+            )
+            st.dataframe(small.head(2000), width="stretch", height=420)
+
+            # Download
+            if not small.empty:
+                buf = io.StringIO()
+                small.to_csv(buf, index=False)
+                st.download_button(
+                    "Download filtered token-level CSV",
+                    buf.getvalue().encode("utf-8"),
+                    file_name=f"holding_tokens_min_{min_days}_days.csv",
+                    mime="text/csv",
+                    width="stretch",
+                )
+            else:
+                st.button("Download filtered token-level CSV", disabled=True, width="stretch")
+
+        # ---------- Duration charts tab (REPLACE THIS WHOLE BLOCK) ----------
+        with tab_ht_charts:
+            st.subheader("Holding duration distributions (ETH only)")
+
+            # Keep only our four ETH collections
+            target_labels = [GENESIS_COL, BABIES_COL, VX_ETH_COL, GK_ETH_COL]
+            plot_df = tokens_ht[tokens_ht["collection"].isin(target_labels)].copy()
+
+            if plot_df.empty:
+                st.info("No token-level holding-time rows for the four ETH collections.")
+            else:
+                # Controls
+                c1, c2, c3 = st.columns([1, 1, 1])
+                with c1:
+                    nbins = st.slider("Bins", min_value=10, max_value=120, value=40, step=5)
+                with c2:
+                    # cap X by percentile so outliers don't squash the view
+                    xcap_pct = st.slider("Cap X at percentile", min_value=80, max_value=100, value=99, step=1)
+                with c3:
+                    norm = st.selectbox("Y-axis", ["Counts", "Density (normalize)"], index=0)
+
+                # Build per-collection tabs
+                tab_g, tab_b, tab_vx, tab_gk = st.tabs(target_labels)
+
+
+                def render_hist(df_one: pd.DataFrame, title: str):
+                    if df_one.empty:
+                        st.info(f"No data for {title}.")
+                        return
+                    # Compute x-limit by chosen percentile
+                    xmax = float(df_one["days_held"].quantile(xcap_pct / 100.0))
+                    # Histogram
+                    fig = px.histogram(
+                        df_one,
+                        x="days_held",
+                        nbins=nbins,
+                        histnorm="probability" if norm.startswith("Density") else None,
+                        opacity=0.9,
+                        title=None,
+                    )
+                    fig.update_layout(
+                        height=520,  # bigger
+                        xaxis_title="Days held",
+                        yaxis_title=("Density" if norm.startswith("Density") else "NFTs"),
+                        bargap=0.05,
+                        margin=dict(l=10, r=10, t=10, b=10),
+                    )
+                    fig.update_xaxes(range=[0, xmax])
+                    st.plotly_chart(fig, config={"responsive": True}, use_container_width=True)
+
+                    # Quick stats
+                    stats = df_one["days_held"].agg(
+                        tokens="count",
+                        min_days="min",
+                        p50_days="median",
+                        avg_days="mean",
+                        max_days="max",
+                    )
+                    # round display
+                    stats = {k: (int(v) if k == "tokens" else round(float(v), 1)) for k, v in stats.items()}
+                    k1, k2, k3, k4 = st.columns(4)
+                    with k1: st.metric("Tokens", f"{stats['tokens']:,}")
+                    with k2: st.metric("Median days", f"{stats['p50_days']}")
+                    with k3: st.metric("Avg days", f"{stats['avg_days']}")
+                    with k4: st.metric("Max days", f"{stats['max_days']}")
+
+
+                with tab_g:
+                    st.markdown(f"### {GENESIS_COL}")
+                    render_hist(plot_df[plot_df["collection"] == GENESIS_COL], GENESIS_COL)
+
+                with tab_b:
+                    st.markdown(f"### {BABIES_COL}")
+                    render_hist(plot_df[plot_df["collection"] == BABIES_COL], BABIES_COL)
+
+                with tab_vx:
+                    st.markdown(f"### {VX_ETH_COL}")
+                    render_hist(plot_df[plot_df["collection"] == VX_ETH_COL], VX_ETH_COL)
+
+                with tab_gk:
+                    st.markdown(f"### {GK_ETH_COL}")
+                    render_hist(plot_df[plot_df["collection"] == GK_ETH_COL], GK_ETH_COL)
